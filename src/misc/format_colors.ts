@@ -1,0 +1,6 @@
+export const PNG_COLOR = ""
+export const JPG_COLOR = ""
+export const PDF_COLOR = ""
+export const TXT_COLOR = ""
+export const MP4_COLOR = ""
+export const MOV_COLOR = ""
