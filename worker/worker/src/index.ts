@@ -11,9 +11,12 @@ interface Env {
 }
 
 const corsHeaders = {
-	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-	"Access-Control-Allow-Headers": "Content-Type, Authorization"
+	"Access-Control-Allow-Origin":
+		"https://arcticfiles-cloud.poopeating1234.workers.dev",
+	"Access-Control-Allow-Methods":
+		"GET, POST, OPTIONS",
+	"Access-Control-Allow-Headers":
+		"Content-Type, Authorization"
 }
 
 async function authenticate(
