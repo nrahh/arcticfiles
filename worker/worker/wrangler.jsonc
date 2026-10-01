@@ -1,0 +1,13 @@
+{
+	"name": "arcticfiles",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "arcticfiles",
+			"database_id": "e9d4a854-b411-4712-829a-1cb9bfcb3bc4"
+		}
+	]
+}
