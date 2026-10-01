@@ -2,7 +2,8 @@ import { Icon } from "@iconify/react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@clerk/clerk-react"
 
-const WORKER_URL = "https://arcticfiles.poopeating1234.workers.dev"
+const WORKER_URL =
+    "https://arcticfiles.poopeating1234.workers.dev"
 
 interface FileItem {
     key: string
@@ -54,6 +55,7 @@ export default function Dashboard() {
     const loadFiles = async () => {
         try {
             setLoading(true)
+            setMessage("")
 
             const token =
                 await getToken()
@@ -85,8 +87,32 @@ export default function Dashboard() {
                 )
             }
 
+            const loadedFiles =
+                (data.files || []).map(
+                    (file: any) => ({
+                        key:
+                            file.fileKey ??
+                            file.file_key ??
+                            file.key ??
+                            file.keyName ??
+                            file.objectKey ??
+                            file.object_key ??
+                            "",
+                        name:
+                            file.fileName ??
+                            file.file_name ??
+                            file.name ??
+                            "",
+                        size:
+                            file.fileSize ??
+                            file.file_size ??
+                            file.size ??
+                            0
+                    })
+                )
+
             setFiles(
-                data.files || []
+                loadedFiles
             )
         } catch (error) {
             console.error(
@@ -121,6 +147,12 @@ export default function Dashboard() {
                 )
             }
 
+            if (!file.key) {
+                throw new Error(
+                    "File key is missing"
+                )
+            }
+
             setMessage(
                 `Downloading ${file.name}...`
             )
@@ -137,12 +169,21 @@ export default function Dashboard() {
                 )
 
             if (!response.ok) {
-                const data =
-                    await response.json()
+                let errorMessage =
+                    "Download failed"
+
+                try {
+                    const data =
+                        await response.json()
+
+                    if (data.error) {
+                        errorMessage =
+                            data.error
+                    }
+                } catch {}
 
                 throw new Error(
-                    data.error ||
-                    "Download failed"
+                    errorMessage
                 )
             }
 
@@ -201,6 +242,12 @@ export default function Dashboard() {
                 )
             }
 
+            if (!file.key) {
+                throw new Error(
+                    "File key is missing"
+                )
+            }
+
             const response =
                 await fetch(
                     `${WORKER_URL}/share`,
@@ -213,7 +260,8 @@ export default function Dashboard() {
                                 "application/json"
                         },
                         body: JSON.stringify({
-                            key: file.key
+                            fileKey:
+                            file.key
                         })
                     }
                 )
@@ -388,7 +436,8 @@ export default function Dashboard() {
                         (file) => (
                             <div
                                 key={
-                                    file.key
+                                    file.key ||
+                                    file.name
                                 }
                                 className="w-full flex flex-row items-center justify-between gap-4 p-3 bg-[#101010] border border-white/5 rounded-xl"
                             >

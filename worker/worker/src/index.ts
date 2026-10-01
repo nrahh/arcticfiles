@@ -1,5 +1,5 @@
-import { verifyToken } from "@clerk/backend"
 import { AwsClient } from "aws4fetch"
+import { verifyToken } from "@clerk/backend"
 
 interface Env {
 	B2_APPLICATION_KEY_ID: string
@@ -19,7 +19,35 @@ const corsHeaders = {
 		"Content-Type, Authorization"
 }
 
-async function authenticate(
+function json(data: unknown, status = 200) {
+	return new Response(JSON.stringify(data), {
+		status,
+		headers: {
+			...corsHeaders,
+			"Content-Type": "application/json"
+		}
+	})
+}
+
+function createB2Client(env: Env) {
+	return new AwsClient({
+		accessKeyId: env.B2_APPLICATION_KEY_ID,
+		secretAccessKey: env.B2_APPLICATION_KEY,
+		service: "s3",
+		region: "ca-east-006"
+	})
+}
+
+function getB2ObjectUrl(env: Env, key: string) {
+	const encodedKey = key
+		.split("/")
+		.map(part => encodeURIComponent(part))
+		.join("/")
+
+	return `${env.B2_ENDPOINT}/${env.B2_BUCKET_NAME}/${encodedKey}`
+}
+
+async function getUserId(
 	request: Request,
 	env: Env
 ): Promise<string | null> {
@@ -30,151 +58,30 @@ async function authenticate(
 		return null
 	}
 
-	const token =
-		authorization.slice(7)
+	const token = authorization.slice(7)
 
 	try {
-		const verifiedToken =
-			await verifyToken(token, {
-				secretKey:
-				env.CLERK_SECRET_KEY
-			})
+		const result = await verifyToken(token, {
+			secretKey: env.CLERK_SECRET_KEY
+		})
 
-		return verifiedToken.sub
+		return result.sub
 	} catch {
 		return null
 	}
 }
 
-function createB2Client(env: Env) {
-	return new AwsClient({
-		accessKeyId:
-		env.B2_APPLICATION_KEY_ID,
-		secretAccessKey:
-		env.B2_APPLICATION_KEY,
-		service: "s3",
-		region: "ca-east-006"
-	})
-}
+function generateDownloadKey() {
+	const bytes = new Uint8Array(12)
 
-function decodeXml(value: string) {
-	return value
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"')
-		.replace(/&#39;/g, "'")
-}
+	crypto.getRandomValues(bytes)
 
-function generateCode() {
-	const chars =
-		"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-
-	const bytes =
-		crypto.getRandomValues(
-			new Uint8Array(8)
+	return Array.from(bytes)
+		.map(byte =>
+			byte.toString(16).padStart(2, "0")
 		)
-
-	let code = ""
-
-	for (const byte of bytes) {
-		code +=
-			chars[
-			byte % chars.length
-				]
-	}
-
-	return `${code.slice(0, 4)}-${code.slice(4)}`
-}
-
-function getFileNameFromKey(key: string) {
-	const decoded =
-		decodeURIComponent(key)
-
-	const slashIndex =
-		decoded.lastIndexOf("/")
-
-	if (slashIndex === -1) {
-		return decoded
-	}
-
-	return decoded.slice(
-		slashIndex + 1
-	)
-}
-
-function createDownloadResponse(
-	b2Response: Response,
-	fileName: string
-) {
-	if (!b2Response.ok) {
-		return new Response(
-			JSON.stringify({
-				error: "File not found"
-			}),
-			{
-				status: 404,
-				headers: {
-					...corsHeaders,
-					"Content-Type":
-						"application/json"
-				}
-			}
-		)
-	}
-
-	const headers =
-		new Headers(corsHeaders)
-
-	headers.set(
-		"Content-Type",
-		b2Response.headers.get(
-			"Content-Type"
-		) || "application/octet-stream"
-	)
-
-	const contentLength =
-		b2Response.headers.get(
-			"Content-Length"
-		)
-
-	if (contentLength) {
-		headers.set(
-			"Content-Length",
-			contentLength
-		)
-	}
-
-	headers.set(
-		"Content-Disposition",
-		`attachment; filename="${fileName.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
-	)
-
-	return new Response(
-		b2Response.body,
-		{
-			status: 200,
-			headers
-		}
-	)
-}
-
-async function downloadB2File(
-	env: Env,
-	key: string
-) {
-	const client =
-		createB2Client(env)
-
-	const b2Url =
-		`${env.B2_ENDPOINT}/${env.B2_BUCKET_NAME}/${key}`
-
-	return client.fetch(
-		b2Url,
-		{
-			method: "GET"
-		}
-	)
+		.join("")
+		.toUpperCase()
 }
 
 export default {
@@ -182,93 +89,69 @@ export default {
 		request: Request,
 		env: Env
 	): Promise<Response> {
-		if (
-			request.method === "OPTIONS"
-		) {
-			return new Response(
-				null,
-				{
-					status: 204,
-					headers:
-					corsHeaders
-				}
-			)
+		if (request.method === "OPTIONS") {
+			return new Response(null, {
+				status: 204,
+				headers: corsHeaders
+			})
 		}
 
-		const url =
-			new URL(request.url)
+		const url = new URL(request.url)
+		const path = url.pathname
 
 		try {
+			/*
+			 * UPLOAD
+			 */
 			if (
-				request.method === "POST" &&
-				url.pathname === "/upload"
+				path === "/upload" &&
+				request.method === "POST"
 			) {
-				const ownerId =
-					await authenticate(
-						request,
-						env
-					)
+				const userId =
+					await getUserId(request, env)
 
-				if (!ownerId) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Unauthorized"
-						}),
-						{
-							status: 401,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+				if (!userId) {
+					return json(
+						{ error: "Unauthorized" },
+						401
 					)
 				}
 
 				const formData =
 					await request.formData()
 
-				const file =
-					formData.get("file")
+				const file = formData.get("file")
 
-				if (
-					!file ||
-					!(file instanceof File)
-				) {
-					return new Response(
-						JSON.stringify({
+				if (!(file instanceof File)) {
+					return json(
+						{
 							error:
 								"No file provided"
-						}),
-						{
-							status: 400,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+						},
+						400
 					)
 				}
 
+				const originalName =
+					file.name || "file"
+
 				const safeName =
-					encodeURIComponent(
-						file.name
-					)
+					originalName
+						.replace(/[\/\\]/g, "_")
+						.replace(/\.\./g, "_")
 
-				const key =
-					`${ownerId}/${safeName}`
-
-				const body =
-					await file.arrayBuffer()
+				const fileKey =
+					`${Date.now()}_${crypto.randomUUID()}_${safeName}`
 
 				const client =
 					createB2Client(env)
 
-				const response =
+				const b2Response =
 					await client.fetch(
-						`${env.B2_ENDPOINT}/${env.B2_BUCKET_NAME}/${key}`,
+						getB2ObjectUrl(
+							env,
+							fileKey
+						),
 						{
 							method: "PUT",
 							headers: {
@@ -276,464 +159,471 @@ export default {
 									file.type ||
 									"application/octet-stream"
 							},
-							body
+							body: file.stream()
 						}
 					)
 
-				if (!response.ok) {
-					const errorText =
-						await response.text()
+				const b2Text =
+					await b2Response.text()
 
-					return new Response(
-						JSON.stringify({
-							error:
-								errorText ||
-								"B2 upload failed"
-						}),
+				if (!b2Response.ok) {
+					return json(
 						{
-							status: 500,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+							error:
+								"B2 upload failed",
+							status:
+							b2Response.status,
+							details:
+							b2Text
+						},
+						500
 					)
 				}
 
-				return new Response(
-					JSON.stringify({
-						success: true,
-						name: file.name
-					}),
-					{
-						status: 200,
-						headers: {
-							...corsHeaders,
-							"Content-Type":
-								"application/json"
-						}
+				await env.DB.prepare(`
+                    INSERT INTO files (
+                        user_id,
+                        file_key,
+                        file_name,
+                        file_size,
+                        content_type,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                `)
+					.bind(
+						userId,
+						fileKey,
+						originalName,
+						file.size,
+						file.type ||
+						"application/octet-stream",
+						Date.now()
+					)
+					.run()
+
+				return json({
+					success: true,
+					file: {
+						key: fileKey,
+						name: originalName,
+						size: file.size,
+						type:
+							file.type ||
+							"application/octet-stream"
 					}
-				)
+				})
 			}
 
+			/*
+			 * GET MY FILES
+			 *
+			 * Only returns files owned by the
+			 * currently logged-in Clerk account.
+			 */
 			if (
-				request.method === "GET" &&
-				url.pathname === "/files"
+				path === "/files" &&
+				request.method === "GET"
 			) {
-				const ownerId =
-					await authenticate(
-						request,
-						env
-					)
+				const userId =
+					await getUserId(request, env)
 
-				if (!ownerId) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Unauthorized"
-						}),
-						{
-							status: 401,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+				if (!userId) {
+					return json(
+						{ error: "Unauthorized" },
+						401
 					)
 				}
 
-				const client =
-					createB2Client(env)
+				const result =
+					await env.DB.prepare(`
+                        SELECT
+                            id,
+                            file_key,
+                            file_name,
+                            file_size,
+                            content_type,
+                            created_at
+                        FROM files
+                        WHERE user_id = ?
+                        ORDER BY created_at DESC
+                    `)
+						.bind(userId)
+						.all()
 
-				const prefix =
-					`${ownerId}/`
-
-				const b2Url =
-					`${env.B2_ENDPOINT}/${env.B2_BUCKET_NAME}?list-type=2&prefix=${encodeURIComponent(prefix)}`
-
-				const response =
-					await client.fetch(
-						b2Url,
-						{
-							method: "GET"
-						}
+				return json({
+					files: result.results.map(
+						(file: any) => ({
+							id: file.id,
+							key: file.file_key,
+							name: file.file_name,
+							size: file.file_size,
+							type:
+							file.content_type,
+							createdAt:
+							file.created_at
+						})
 					)
-
-				if (!response.ok) {
-					const errorText =
-						await response.text()
-
-					return new Response(
-						JSON.stringify({
-							error:
-								errorText ||
-								"Failed to list files"
-						}),
-						{
-							status: 500,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
-					)
-				}
-
-				const xml =
-					await response.text()
-
-				const files: {
-					key: string
-					name: string
-					size: number
-				}[] = []
-
-				const contents =
-					xml.match(
-						/<Contents>[\s\S]*?<\/Contents>/g
-					) || []
-
-				for (const content of contents) {
-					const keyMatch =
-						content.match(
-							/<Key>([\s\S]*?)<\/Key>/
-						)
-
-					const sizeMatch =
-						content.match(
-							/<Size>([\s\S]*?)<\/Size>/
-						)
-
-					if (!keyMatch) {
-						continue
-					}
-
-					const key =
-						decodeXml(
-							keyMatch[1]
-						)
-
-					const size =
-						sizeMatch
-							? Number(
-								sizeMatch[1]
-							)
-							: 0
-
-					files.push({
-						key,
-						name:
-							getFileNameFromKey(
-								key
-							),
-						size
-					})
-				}
-
-				return new Response(
-					JSON.stringify({
-						files
-					}),
-					{
-						status: 200,
-						headers: {
-							...corsHeaders,
-							"Content-Type":
-								"application/json"
-						}
-					}
-				)
+				})
 			}
 
+			/*
+			 * GENERATE DOWNLOAD KEY
+			 *
+			 * Only the owner of a file can generate
+			 * a download key for that file.
+			 */
 			if (
-				request.method === "POST" &&
-				url.pathname === "/share"
+				path === "/share" &&
+				request.method === "POST"
 			) {
-				const ownerId =
-					await authenticate(
-						request,
-						env
-					)
+				const userId =
+					await getUserId(request, env)
 
-				if (!ownerId) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Unauthorized"
-						}),
-						{
-							status: 401,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+				if (!userId) {
+					return json(
+						{ error: "Unauthorized" },
+						401
 					)
 				}
 
 				const body =
 					await request.json<{
-						key?: string
+						fileKey?: string
 					}>()
 
-				const key =
-					body.key
-
-				if (
-					!key ||
-					!key.startsWith(
-						`${ownerId}/`
-					)
-				) {
-					return new Response(
-						JSON.stringify({
+				if (!body.fileKey) {
+					return json(
+						{
 							error:
-								"Invalid file"
-						}),
-						{
-							status: 403,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+								"fileKey is required"
+						},
+						400
 					)
 				}
 
-				const existing =
-					await env.DB
-						.prepare(
-							"SELECT code FROM shares WHERE file_key = ? AND owner_id = ? LIMIT 1"
-						)
+				const ownedFile =
+					await env.DB.prepare(`
+                        SELECT file_key
+                        FROM files
+                        WHERE file_key = ?
+                        AND user_id = ?
+                        LIMIT 1
+                    `)
 						.bind(
-							key,
-							ownerId
+							body.fileKey,
+							userId
 						)
-						.first<{
-							code: string
-						}>()
+						.first()
 
-				if (existing) {
-					return new Response(
-						JSON.stringify({
-							success: true,
-							code:
-							existing.code
-						}),
+				if (!ownedFile) {
+					return json(
 						{
-							status: 200,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+							error:
+								"File not found"
+						},
+						404
 					)
 				}
 
-				let code = ""
+				const code =
+					generateDownloadKey()
 
-				for (;;) {
-					code =
-						generateCode()
-
-					const exists =
-						await env.DB
-							.prepare(
-								"SELECT code FROM shares WHERE code = ? LIMIT 1"
-							)
-							.bind(code)
-							.first()
-
-					if (!exists) {
-						break
-					}
-				}
-
-				await env.DB
-					.prepare(
-						"INSERT INTO shares (code, file_key, owner_id, created_at) VALUES (?, ?, ?, ?)"
-					)
+				await env.DB.prepare(`
+                    INSERT INTO shares (
+                        code,
+                        owner_id,
+                        file_key,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                `)
 					.bind(
 						code,
-						key,
-						ownerId,
+						userId,
+						body.fileKey,
 						Date.now()
 					)
 					.run()
 
-				return new Response(
-					JSON.stringify({
-						success: true,
-						code
-					}),
-					{
-						status: 200,
-						headers: {
-							...corsHeaders,
-							"Content-Type":
-								"application/json"
-						}
-					}
-				)
+				return json({
+					success: true,
+					code,
+					fileKey: body.fileKey
+				})
 			}
 
+			/*
+			 * DOWNLOAD USING DOWNLOAD KEY
+			 *
+			 * The person entering the key does NOT
+			 * need to own the file.
+			 */
 			if (
-				request.method === "GET" &&
-				url.pathname ===
-				"/download-own"
-			) {
-				const ownerId =
-					await authenticate(
-						request,
-						env
-					)
-
-				if (!ownerId) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Unauthorized"
-						}),
-						{
-							status: 401,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
-					)
-				}
-
-				const key =
-					url.searchParams.get(
-						"key"
-					)
-
-				if (
-					!key ||
-					!key.startsWith(
-						`${ownerId}/`
-					)
-				) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Forbidden"
-						}),
-						{
-							status: 403,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
-					)
-				}
-
-				const response =
-					await downloadB2File(
-						env,
-						key
-					)
-
-				return createDownloadResponse(
-					response,
-					getFileNameFromKey(key)
-				)
-			}
-
-			if (
-				request.method === "GET" &&
-				url.pathname.startsWith(
-					"/download/"
-				)
+				path.startsWith("/download/") &&
+				request.method === "GET"
 			) {
 				const code =
-					decodeURIComponent(
-						url.pathname.slice(
-							"/download/".length
-						)
-					).toUpperCase()
+					path.slice(
+						"/download/".length
+					)
 
 				if (!code) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Missing code"
-						}),
+					return json(
 						{
-							status: 400,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+							error:
+								"Download key required"
+						},
+						400
 					)
 				}
 
 				const share =
-					await env.DB
-						.prepare(
-							"SELECT file_key FROM shares WHERE code = ? LIMIT 1"
-						)
+					await env.DB.prepare(`
+                        SELECT
+                            file_key
+                        FROM shares
+                        WHERE code = ?
+                        LIMIT 1
+                    `)
 						.bind(code)
 						.first<{
 							file_key: string
 						}>()
 
 				if (!share) {
-					return new Response(
-						JSON.stringify({
-							error:
-								"Invalid download code"
-						}),
+					return json(
 						{
-							status: 404,
-							headers: {
-								...corsHeaders,
-								"Content-Type":
-									"application/json"
-							}
-						}
+							error:
+								"Invalid download key"
+						},
+						404
 					)
 				}
 
-				const response =
-					await downloadB2File(
-						env,
-						share.file_key
+				const file =
+					await env.DB.prepare(`
+                        SELECT
+                            file_name,
+                            content_type
+                        FROM files
+                        WHERE file_key = ?
+                        LIMIT 1
+                    `)
+						.bind(share.file_key)
+						.first<{
+							file_name: string
+							content_type: string
+						}>()
+
+				if (!file) {
+					return json(
+						{
+							error:
+								"File no longer exists"
+						},
+						404
+					)
+				}
+
+				const client =
+					createB2Client(env)
+
+				const b2Response =
+					await client.fetch(
+						getB2ObjectUrl(
+							env,
+							share.file_key
+						),
+						{
+							method: "GET"
+						}
 					)
 
-				return createDownloadResponse(
-					response,
-					getFileNameFromKey(
-						share.file_key
+				if (!b2Response.ok) {
+					const errorText =
+						await b2Response.text()
+
+					return json(
+						{
+							error:
+								"B2 download failed",
+							status:
+							b2Response.status,
+							details:
+							errorText
+						},
+						500
 					)
+				}
+
+				const headers =
+					new Headers(corsHeaders)
+
+				headers.set(
+					"Content-Type",
+					file.content_type ||
+					"application/octet-stream"
+				)
+
+				headers.set(
+					"Content-Disposition",
+					`attachment; filename="${file.file_name.replace(/"/g, "")}"`
+				)
+
+				const contentLength =
+					b2Response.headers.get(
+						"Content-Length"
+					)
+
+				if (contentLength) {
+					headers.set(
+						"Content-Length",
+						contentLength
+					)
+				}
+
+				return new Response(
+					b2Response.body,
+					{
+						status: 200,
+						headers
+					}
 				)
 			}
 
-			return new Response(
-				JSON.stringify({
-					error:
-						"Not found"
-				}),
-				{
-					status: 404,
-					headers: {
-						...corsHeaders,
-						"Content-Type":
-							"application/json"
-					}
+			/*
+			 * DOWNLOAD OWN FILE
+			 */
+			if (
+				path === "/download-own" &&
+				request.method === "GET"
+			) {
+				const userId =
+					await getUserId(request, env)
+
+				if (!userId) {
+					return json(
+						{ error: "Unauthorized" },
+						401
+					)
 				}
+
+				const fileKey =
+					url.searchParams.get("file")
+
+				if (!fileKey) {
+					return json(
+						{
+							error:
+								"file is required"
+						},
+						400
+					)
+				}
+
+				const file =
+					await env.DB.prepare(`
+                        SELECT
+                            file_key,
+                            file_name,
+                            content_type
+                        FROM files
+                        WHERE file_key = ?
+                        AND user_id = ?
+                        LIMIT 1
+                    `)
+						.bind(
+							fileKey,
+							userId
+						)
+						.first<{
+							file_key: string
+							file_name: string
+							content_type: string
+						}>()
+
+				if (!file) {
+					return json(
+						{
+							error:
+								"File not found"
+						},
+						404
+					)
+				}
+
+				const client =
+					createB2Client(env)
+
+				const b2Response =
+					await client.fetch(
+						getB2ObjectUrl(
+							env,
+							file.file_key
+						),
+						{
+							method: "GET"
+						}
+					)
+
+				if (!b2Response.ok) {
+					const errorText =
+						await b2Response.text()
+
+					return json(
+						{
+							error:
+								"B2 download failed",
+							status:
+							b2Response.status,
+							details:
+							errorText
+						},
+						500
+					)
+				}
+
+				const headers =
+					new Headers(corsHeaders)
+
+				headers.set(
+					"Content-Type",
+					file.content_type ||
+					"application/octet-stream"
+				)
+
+				headers.set(
+					"Content-Disposition",
+					`attachment; filename="${file.file_name.replace(/"/g, "")}"`
+				)
+
+				const contentLength =
+					b2Response.headers.get(
+						"Content-Length"
+					)
+
+				if (contentLength) {
+					headers.set(
+						"Content-Length",
+						contentLength
+					)
+				}
+
+				return new Response(
+					b2Response.body,
+					{
+						status: 200,
+						headers
+					}
+				)
+			}
+
+			return json(
+				{
+					error: "Not found"
+				},
+				404
 			)
 		} catch (error) {
 			console.error(
@@ -741,21 +631,16 @@ export default {
 				error
 			)
 
-			return new Response(
-				JSON.stringify({
+			return json(
+				{
 					error:
+						"Internal server error",
+					message:
 						error instanceof Error
 							? error.message
-							: "Internal server error"
-				}),
-				{
-					status: 500,
-					headers: {
-						...corsHeaders,
-						"Content-Type":
-							"application/json"
-					}
-				}
+							: String(error)
+				},
+				500
 			)
 		}
 	}
