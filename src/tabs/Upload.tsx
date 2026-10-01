@@ -2,7 +2,7 @@ import { Icon } from "@iconify/react"
 import { useRef, useState } from "react"
 import { useAuth } from "@clerk/clerk-react"
 
-const WORKER_URL = "http://localhost:8787"
+const WORKER_URL = "https://arcticfiles.poopeating1234.workers.dev"
 
 export default function Upload() {
     const inputRef =
