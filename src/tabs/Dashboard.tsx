@@ -2,7 +2,7 @@ import { Icon } from "@iconify/react"
 import { useEffect, useState } from "react"
 import { useAuth } from "@clerk/clerk-react"
 
-const WORKER_URL = "https://worker.poopeating1234.workers.dev"
+const WORKER_URL = "https://arcticfiles.poopeating1234.workers.dev"
 
 interface FileItem {
     key: string
